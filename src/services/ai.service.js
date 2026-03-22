@@ -53,7 +53,7 @@ const interviewReportSchema=z.object({
 
         //generating content with fuction calling
         const response =  await ai.models.generateContent({
-            model:"gemini-3.1-pro-preview",
+            model:"gemini-3.1-flash-lite-preview",
             contents:prompt,
             config:{
                 responseMimeType:"application/json",
@@ -61,7 +61,7 @@ const interviewReportSchema=z.object({
             }
         })
     
-        // console.log(JSON.parse(response.text)) 
+        console.log(JSON.parse(response.text)) 
         return JSON.parse(response.text);
     
     }catch (error) {
@@ -75,5 +75,3 @@ const interviewReportSchema=z.object({
 }
 
 export default generateInterviewReport;
-
-
