@@ -38,6 +38,6 @@ interviewRouter.get("/",authUser,getAllInterviewReportsController)
  * @access private
  */
 
-interviewRouter.post("/resume/pdf/:id",authUser,generateResumePdfController)
+interviewRouter.post("/resume/pdf/:interviewReportId",authUser,generateResumePdfController)
 
 export default interviewRouter;

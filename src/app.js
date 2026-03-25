@@ -21,6 +21,4 @@ app.use("/api/interview",interviewRouter);
 
 
 
-
-
 export default app;

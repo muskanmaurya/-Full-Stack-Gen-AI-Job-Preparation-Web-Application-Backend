@@ -2,6 +2,17 @@ import jwt from "jsonwebtoken";
 import tokenBlacklistModel from "../models/blacklist.model.js";
 
 async function authUser(req, res, next) {
+  const guestToken = req.headers["x-guest-token"];
+
+  if (!req.cookies.token && guestToken) {
+    req.user = {
+      id: String(guestToken),
+      isGuest: true,
+    };
+
+    return next();
+  }
+
   const token = req.cookies.token;
 
   if (!token) {

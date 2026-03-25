@@ -2,6 +2,7 @@ import {GoogleGenAI} from "@google/genai"
 import {z} from "zod"
 import { zodToJsonSchema } from "zod-to-json-schema";
 import puppeteer from "puppeteer";
+import interviewReportModel from "../models/interviewReport.model.js"
 
 
 //defining a zod schema for the interview report
@@ -24,8 +25,8 @@ const interviewReportSchema=z.object({
         preparationPlan:z.array(z.object({
             day:z.number().int().positive().describe("The day number in the preparation plan, starting from 1."),
             focus:z.string().describe("The main focus of this day in the preparation plan, e.g. data structures, system design, behavioral questions etc."),
-            tasks:z.array(z.string()).describe("List of tasks to be done on this day to prepare for the interview.")
-        })).describe("A day-wise preparation plan for the candidate to follow in order to prepare effectively."),
+            tasks:z.array(z.string()).min(2).describe("List of tasks to be done on this day to prepare for the interview.")
+        })).max(10).describe("A day-wise preparation plan for the candidate to follow in order to prepare effectively. It can also be empty for highly job-ready candidates."),
         title:z.string().describe("A short role title inferred from the job description.")
     }).describe("A day-wise preparaton plan for the candidate to follow inorder to prepare for the interview effectively")
     
@@ -45,54 +46,76 @@ const interviewReportSchema=z.object({
 
 
     //generate interview report function
-    export async function generateInterviewReport({resume,selfDescription,jobDescription}){
+    export async function generateInterviewReport({resume, selfDescription, jobDescription}){
+    try {
+                const prompt = `You are generating interview preparation data for backend persistence.
+                Return ONLY valid JSON (no markdown, no explanation, no code fences).
+                Match this schema exactly:
+        {
+          "title": "string",
+          "matchScore": number,
+          "technicalQuestions": [{"question": "string", "intention": "string", "answer": "string"}],
+          "behavioralQuestions": [{"question": "string", "intention": "string", "answer": "string"}],
+          "skillGaps": [{"skill": "string", "severity": "low"|"medium"|"high"}],
+          "preparationPlan": [{"day": number, "focus": "string", "tasks": ["string"]}]
+        }
 
+                Rules:
+                - Use object arrays only. Never output flattened tokens like ["question", "..."] or ["day", "1", "focus", ...].
+                - Ensure every question item has question, intention, answer.
+                - Ensure every skill gap item has skill and severity.
+                - Ensure preparationPlan has 0 to 4/5 days.
+                - If the candidate is already highly prepared, it is valid to return an empty preparationPlan.
+                - If preparationPlan is non-empty, ensure it is ordered by day starting at 1 with no gaps (1,2,3...).
+                - Ensure every preparationPlan day has a short, specific focus title (e.g. "System Design & Architecture").
+                - Ensure each day includes at least 2 concrete tasks, task strings only.
+                - Keep output concise and realistic for interview preparation.
+        
+        Data: ${selfDescription}
+        Resume: ${resume}
+        JD: ${jobDescription}`;
 
-        try {
-
-        const prompt = `You are generating JSON for an interview report API.
-    Return ONLY valid JSON. No markdown. No explanation. No extra keys.
-
-    The output MUST match this exact schema and key names:
-    {
-      "title": string,
-      "matchScore": number (0-100),
-      "technicalQuestions": [{ "question": string, "intention": string, "answer": string }],
-      "behavioralQuestions": [{ "question": string, "intention": string, "answer": string }],
-      "skillGaps": [{ "skill": string, "severity": "low" | "medium" | "high" }],
-      "preparationPlan": [{ "day": number, "focus": string, "tasks": string[] }]
-    }
-
-    Hard constraints:
-    1. Include all keys exactly as above.
-    2. Do not include keys like candidate_name, suitability_score, strengths, recommendation, gap_analysis, or any extra key.
-    3. matchScore must be between 0 and 100.
-    4. technicalQuestions must have exactly 5 items.
-    5. behavioralQuestions must have exactly 5 items.
-    6. skillGaps must have 4 to 8 items; severity only low/medium/high.
-    7. preparationPlan must have 7 to 14 items.
-    8. preparationPlan.day starts at 1 and increases sequentially by 1.
-    9. Each preparationPlan item must include at least 2 tasks.
-    10. Keep all strings non-empty and role-specific.
-
-    Candidate details:
-    Resume: ${resume}
-    Self Description: ${selfDescription}
-    Job Description: ${jobDescription}`
-
-        //generating content with fuNction calling
-        const response =  await ai.models.generateContent({
-            model:"gemini-3-flash-preview",
-            contents:prompt,
-            config:{
-                responseMimeType:"application/json",
-                responseSchema:zodToJsonSchema(interviewReportSchema)
+        const response = await ai.models.generateContent({
+            model: "gemini-2.5-flash", // Stable model for 2026
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            config: {
+                responseMimeType: "application/json",
+                responseSchema: zodToJsonSchema(interviewReportSchema)
             }
-        })
-    
-        console.log(JSON.parse(response.text)) 
-        return JSON.parse(response.text);
-    
+        });
+
+        console.log(response.text);
+
+        const jsonContent = JSON.parse(response.text);
+        console.log(jsonContent);
+
+        const rawData = JSON.parse(response.text);
+
+        // FORCE MAPPING: This prevents the Mongoose "got false" error 
+        // by ensuring every string becomes an object before it hits the DB.
+        return {
+            title: rawData.title || "Software Engineer",
+            matchScore: rawData.matchScore || 0,
+            technicalQuestions: (rawData.technicalQuestions || []).map(q => ({
+                question: typeof q === 'string' ? q : q.question,
+                intention: q.intention || "Assess technical skill",
+                answer: q.answer || "Standard industry approach"
+            })),
+            behavioralQuestions: (rawData.behavioralQuestions || []).map(q => ({
+                question: typeof q === 'string' ? q : q.question,
+                intention: q.intention || "Assess soft skills",
+                answer: q.answer || "Use STAR method"
+            })),
+            skillGaps: (rawData.skillGaps || []).map(s => ({
+                skill: typeof s === 'string' ? s : s.skill,
+                severity: s.severity || "medium"
+            })),
+            preparationPlan: (rawData.preparationPlan || []).map((p, i) => ({
+                day: p.day || i + 1,
+                focus: p.focus || "Interview Prep",
+                tasks: Array.isArray(p.tasks) ? p.tasks : [String(p)]
+            }))
+        };
     }catch (error) {
     if (error.status === 429) {
       console.error("RATE LIMIT: Free tier exhausted. Wait 60s.");
@@ -108,7 +131,7 @@ const interviewReportSchema=z.object({
         const page=await browser.newPage();
         await page.setContent(htmlContent,{waitUntil:"networkidle0"})
 
-        const pdfBuffer=await page.pdf({format:"A4"})
+        const pdfBuffer=await page.pdf({format:"A4",margin : { top: "15px", bottom: "15px", left: "10px", right: "10px"}})
 
         await browser.close();
 
@@ -131,6 +154,8 @@ const interviewReportSchema=z.object({
                         you can highlight the content using some colors or different font styles but the overall design should be simple and professional.
                         The content should be ATS friendly, i.e. it should be easily parsable by ATS systems without losing important information.
                         The resume should not be so lengthy, it should ideally be 1-2 pages long when converted to PDF. Focus on quality rather than quantity and make sure to include all the relevant information that can increase the candidate's chances of getting an interview call for the given job description.
+                        Do not wrap the resume in a card/container with gray background, border, shadow, or rounded corners.
+                        Keep the layout print-safe and simple for A4 pages, and avoid fixed viewport heights that break pagination.
                     `
 
         const response = await ai.models.generateContent({

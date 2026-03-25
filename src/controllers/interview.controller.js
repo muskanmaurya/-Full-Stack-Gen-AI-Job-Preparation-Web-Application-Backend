@@ -2,6 +2,19 @@ import { PDFParse } from "pdf-parse";
 import { generateInterviewReport,generateResumePdf } from "../services/ai.service.js";
 import interviewReportModel from "../models/interviewReport.model.js";
 
+const guestInterviewReports = new Map();
+
+const getGuestReportKey = (guestId, reportId) => `${guestId}::${reportId}`;
+
+const getResumeText = async (resumeFile) => {
+    if (!resumeFile) {
+        return "";
+    }
+
+    const parsed = await (new PDFParse(Uint8Array.from(resumeFile.buffer))).getText();
+    return parsed.text;
+}
+
 /**
  * @description controller to generate interview report on the basic of user self description, resume odf and job description
  */
@@ -9,19 +22,53 @@ import interviewReportModel from "../models/interviewReport.model.js";
 export const generateInterviewReportController=async(req, res)=>{
 
     const resumeFile =req.file; // Access the uploaded file from multer
-
-    const resumeContent = await (new PDFParse(Uint8Array.from(req.file.buffer))).getText();
     const {selfDescription, jobDescription} = req.body;
 
+    if (!jobDescription) {
+        return res.status(400).json({
+            message: "Job description is required"
+        })
+    }
+
+    if (!resumeFile && !selfDescription) {
+        return res.status(400).json({
+            message: "Either resume or self description is required"
+        })
+    }
+
+    const resumeText = await getResumeText(resumeFile);
+
     const interviewReportByAi=await generateInterviewReport({
-        resume:resumeContent.text,
+        resume:resumeText,
         selfDescription,
         jobDescription
     })
 
+    if (req.user?.isGuest) {
+        const tempReportId = `guest-report-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        const interviewReport = {
+            _id: tempReportId,
+            user: req.user.id,
+            resume: resumeText,
+            selfDescription,
+            jobDescription,
+            ...interviewReportByAi,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            isGuest: true,
+        }
+
+        guestInterviewReports.set(getGuestReportKey(req.user.id, tempReportId), interviewReport);
+
+        return res.status(201).json({
+            message:"Temporary guest interview report generated successfully",
+            interviewReport
+        })
+    }
+
     const interviewReport = await interviewReportModel.create({
         user:req.user.id,
-        resume:resumeContent.text,
+        resume:resumeText,
         selfDescription,
         jobDescription,
         ...interviewReportByAi
@@ -39,6 +86,21 @@ export const generateInterviewReportController=async(req, res)=>{
 
 export const getInterviewReportByIdController=async(req,res)=>{
     const {interviewId}=req.params;
+
+    if (req.user?.isGuest) {
+        const interviewReport = guestInterviewReports.get(getGuestReportKey(req.user.id, interviewId));
+
+        if(!interviewReport){
+            return res.status(404).json({
+                message:"Interview report not found"
+            })
+        }
+
+        return res.status(200).json({
+            message:"Interview report fetched successfully",
+            interviewReport
+        })
+    }
 
     const interviewReport = await interviewReportModel.findOne({_id:interviewId,user:req.user.id})
 
@@ -59,7 +121,27 @@ export const getInterviewReportByIdController=async(req,res)=>{
  */
 
 export const getAllInterviewReportsController=async(req,res) =>{
-    const interviewReports=await interviewReportModel.find({user:req.user.id}).sort({createdAt:-1}).select("-resume -selfDescription -jobDescription -__v -technicalQuestions -behavioralQuestions -skillGaps-preparationPlan")
+    if (req.user?.isGuest) {
+        const interviewReports = [...guestInterviewReports.entries()]
+            .filter(([key]) => key.startsWith(`${req.user.id}::`))
+            .map(([, report]) => ({
+                _id: report._id,
+                title: report.title,
+                matchScore: report.matchScore,
+                createdAt: report.createdAt,
+            }))
+            .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+        return res.status(200).json({
+            message:"Interview reports fetched successfully",
+            interviewReports
+        })
+    }
+
+    const interviewReports=await interviewReportModel
+        .find({user:req.user.id})
+        .sort({createdAt:-1})
+        .select("-resume -selfDescription -jobDescription -__v -technicalQuestions -behavioralQuestions -skillGaps -preparationPlan")
 
     res.status(200).json({
         message:"Interview reports fetched successfully",
@@ -72,9 +154,29 @@ export const getAllInterviewReportsController=async(req,res) =>{
  */
 
 export const generateResumePdfController=async(req,res)=>{
-    const {interviewReportId}=req.params;
+    const interviewReportId = req.params.interviewReportId || req.params.id;
 
-    const interviewReport=await interviewReportModel.findById(interviewReportId)
+    if (req.user?.isGuest) {
+        const interviewReport = guestInterviewReports.get(getGuestReportKey(req.user.id, interviewReportId));
+
+        if(!interviewReport){
+            return res.status(404).json({
+                message:"Interview report not found"
+            })
+        }
+
+        const {resume,selfDescription,jobDescription}=interviewReport;
+        const pdfBuffer = await generateResumePdf({resume, selfDescription, jobDescription})
+
+        res.set({
+            "content-Type": "application/pdf",
+            "content-Disposition":`attachment;filename=resume_${interviewReportId}.pdf`
+        })
+
+        return res.send(pdfBuffer);
+    }
+
+    const interviewReport=await interviewReportModel.findOne({_id:interviewReportId,user:req.user.id})
 
     if(!interviewReport){
         return res.status(404).json({
