@@ -17,3 +17,5 @@ import connectToDB from './src/config/database.js';
 app.listen(3000,(req,res)=>{
     console.log(`server is running on port 3000`);
 })
+
+app.get("/", (req, res) => res.send("API is running and ready for Vercel!"));
