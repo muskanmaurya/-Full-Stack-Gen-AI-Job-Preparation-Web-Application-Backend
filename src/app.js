@@ -11,9 +11,11 @@ const app = express();
 app.use(express.json());
 app.use(cookieParser());
 app.use(cors({
-    origin:process.env.NODE_BASE_API_URL,
-    credentials:true
-}))
+    origin: "https://full-stack-gen-ai-job-preparation-w.vercel.app", // No trailing slash!
+    credentials: true, // Allows the browser to send cookies
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    allowedHeaders: ["Content-Type", "Authorization"]
+}));
 
 //api route prefix
 app.use("/api/auth",authRouter);
