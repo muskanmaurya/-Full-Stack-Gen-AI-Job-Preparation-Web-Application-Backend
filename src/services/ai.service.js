@@ -84,12 +84,14 @@ const interviewReportSchema=z.object({
             }
         });
 
-        console.log(response.text);
+        console.log("response.text: ",response.text);
 
         const jsonContent = JSON.parse(response.text);
         console.log(jsonContent);
 
         const rawData = JSON.parse(response.text);
+
+        console.log("rawData: ", rawData);
 
         // FORCE MAPPING: This prevents the Mongoose "got false" error 
         // by ensuring every string becomes an object before it hits the DB.

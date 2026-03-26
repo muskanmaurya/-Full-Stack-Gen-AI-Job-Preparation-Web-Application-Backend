@@ -44,6 +44,8 @@ export const generateInterviewReportController=async(req, res)=>{
         jobDescription
     })
 
+    console.log("Generated Interview Report by AI:", interviewReportByAi);
+
     if (req.user?.isGuest) {
         const tempReportId = `guest-report-${Date.now()}-${Math.random().toString(36).slice(2)}`;
         const interviewReport = {
@@ -73,6 +75,7 @@ export const generateInterviewReportController=async(req, res)=>{
         jobDescription,
         ...interviewReportByAi
     })
+
 
     res.status(201).json({
         message:"Interview report generated successfully",
