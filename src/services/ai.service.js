@@ -49,6 +49,9 @@ const interviewReportSchema=z.object({
     export async function generateInterviewReport({resume, selfDescription, jobDescription}){
     try {
                 const prompt = `You are generating interview preparation data for backend persistence.
+
+                Even if the user provides a one-line description, "N/A", or minimal input, you MUST generate a complete and high-quality response. If the Job Description is missing or insufficient, analyze the Resume to predict the most likely roles and provide technical/behavioral questions, skill gaps, and a preparation plan based on the candidate's professional background alone. Your response should never fail and must always follow the required structure.
+
                 Return ONLY valid JSON (no markdown, no explanation, no code fences).
                 Match this schema exactly:
         {
@@ -161,7 +164,7 @@ const interviewReportSchema=z.object({
                     `
 
         const response = await ai.models.generateContent({
-            model:"gemini-3-flash-preview",
+            model:"gemini-2.5-flash",
             contents:prompt,
             config:{
                 responseMimeType:"application/json",

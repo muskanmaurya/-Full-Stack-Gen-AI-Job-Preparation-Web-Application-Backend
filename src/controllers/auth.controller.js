@@ -146,7 +146,12 @@ export const logoutUserController = async (req, res) => {
     res.status(200).json({
       message: "user logged out successfully",
     });
-  } catch (error) {}
+  } catch (error) {
+    console.log("error in logoutUserController: ", error);
+    res.status(500).json({
+      message: "internal server error",
+    });
+  }
 };
 
 /**
@@ -166,5 +171,10 @@ export const getMeController = async (req, res) => {
         email: user.email,
       },
     });
-  } catch (error) {}
+  } catch (error) {
+    console.log("error in getMeController: ", error);
+    res.status(500).json({
+      message: "internal server error",
+    });
+  }
 };

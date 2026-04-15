@@ -1,0 +1,1 @@
+import 'dotenv/config'; import { generateResumePdf } from './src/services/ai.service.js';(async () => { try { await generateResumePdf({resume: 'test', selfDescription: 'test', jobDescription: 'test'}); console.log('success'); } catch (e) { console.error('fail:', e); process.exit(1)} })();
