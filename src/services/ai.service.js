@@ -2,7 +2,6 @@ import {GoogleGenAI} from "@google/genai"
 import {z} from "zod"
 import { zodToJsonSchema } from "zod-to-json-schema";
 import puppeteer from "puppeteer";
-import interviewReportModel from "../models/interviewReport.model.js"
 
 
 //defining a zod schema for the interview report
@@ -45,8 +44,62 @@ const interviewReportSchema=z.object({
     const ai = new GoogleGenAI({ apiKey });
 
     const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
+    const DEFAULT_PUPPETEER_ARGS = [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--no-zygote",
+    ];
 
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    const getLaunchConfigCandidates = () => {
+        const executablePathFromEnv = process.env.PUPPETEER_EXECUTABLE_PATH;
+        const executablePathFromPuppeteer = typeof puppeteer.executablePath === "function"
+            ? puppeteer.executablePath()
+            : undefined;
+
+        const baseConfig = {
+            headless: true,
+            protocolTimeout: 120000,
+            args: DEFAULT_PUPPETEER_ARGS,
+        };
+
+        const candidates = [baseConfig];
+
+        if (executablePathFromEnv) {
+            candidates.push({
+                ...baseConfig,
+                executablePath: executablePathFromEnv,
+            });
+        }
+
+        if (executablePathFromPuppeteer) {
+            candidates.push({
+                ...baseConfig,
+                executablePath: executablePathFromPuppeteer,
+            });
+        }
+
+        return candidates;
+    };
+
+    const launchBrowserWithRetry = async () => {
+        const configs = getLaunchConfigCandidates();
+        let lastError;
+
+        for (let i = 0; i < configs.length; i += 1) {
+            try {
+                return await puppeteer.launch(configs[i]);
+            } catch (error) {
+                lastError = error;
+                console.error(`Puppeteer launch failed (config ${i + 1}/${configs.length}):`, error?.message || error);
+            }
+        }
+
+        throw new Error(`Unable to launch Chromium for PDF generation. ${lastError?.message || "Unknown Puppeteer launch error"}`);
+    };
 
     const getErrorStatus = (error) => error?.status || error?.response?.status;
 
@@ -233,24 +286,39 @@ const interviewReportSchema=z.object({
     }
 
     export async function generatePdfFromHtml(htmlContent){
-        const browser = await puppeteer.launch({
-            headless: true,
-            args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
-        });
+        let browser;
 
         try {
+            if (!htmlContent || !String(htmlContent).trim()) {
+                throw new Error("Cannot generate PDF: HTML content is empty");
+            }
+
+            browser = await launchBrowserWithRetry();
+
             const page = await browser.newPage();
-            await page.setContent(htmlContent, { waitUntil: "networkidle0" });
+            page.setDefaultTimeout(45000);
+            await page.setContent(htmlContent, { waitUntil: "domcontentloaded", timeout: 45000 });
+            await page.emulateMediaType("screen");
 
             const pdfBuffer = await page.pdf({
                 format: "A4",
                 printBackground: true,
                 margin: { top: "15px", bottom: "15px", left: "10px", right: "10px" },
+                preferCSSPageSize: true,
             });
 
             return pdfBuffer;
+        } catch (error) {
+            console.error("Resume PDF generation failed in Puppeteer:", {
+                message: error?.message,
+                code: error?.code,
+                stack: error?.stack,
+            });
+            throw error;
         } finally {
-            await browser.close();
+            if (browser) {
+                await browser.close().catch(() => {});
+            }
         }
     }
 
@@ -376,6 +444,11 @@ const interviewReportSchema=z.object({
             } catch (error) {
                 lastError = error;
                 console.error(`Error in generateResumePdf (attempt ${attempt}/${maxAttempts}):`, error?.message || error);
+                console.error("AI/HTML resume generation details:", {
+                    status: getErrorStatus(error),
+                    code: error?.code,
+                    message: error?.message,
+                });
 
                 if (attempt < maxAttempts) {
                     await sleep(750 * attempt);
@@ -385,5 +458,10 @@ const interviewReportSchema=z.object({
 
         console.warn("Using fallback resume PDF HTML due to AI failure.", lastError?.message || lastError);
         const fallbackHtml = buildFallbackResumeHtml({ resume, selfDescription, jobDescription });
-        return await generatePdfFromHtml(fallbackHtml);
+        try {
+            return await generatePdfFromHtml(fallbackHtml);
+        } catch (fallbackError) {
+            console.error("Fallback resume PDF generation failed:", fallbackError?.message || fallbackError);
+            throw new Error(`Resume PDF generation failed in Puppeteer: ${fallbackError?.message || "Unknown error"}`);
+        }
     }
