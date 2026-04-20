@@ -44,11 +44,118 @@ const interviewReportSchema=z.object({
     // Create a single instance of GoogleGenAI to be used across the application
     const ai = new GoogleGenAI({ apiKey });
 
+    const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
 
-    //generate interview report function
-    export async function generateInterviewReport({resume, selfDescription, jobDescription}){
-    try {
-                const prompt = `You are generating interview preparation data for backend persistence.
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    const getErrorStatus = (error) => error?.status || error?.response?.status;
+
+    const isRetryableAiError = (error) => {
+        const status = getErrorStatus(error);
+        const code = error?.code;
+
+        return RETRYABLE_STATUS_CODES.has(status) || code === "ETIMEDOUT" || code === "ECONNRESET";
+    };
+
+    const normalizeInterviewReport = (rawData) => ({
+        title: rawData.title || "Software Engineer",
+        matchScore: rawData.matchScore || 0,
+        technicalQuestions: (rawData.technicalQuestions || []).map(q => ({
+            question: typeof q === 'string' ? q : q.question,
+            intention: q.intention || "Assess technical skill",
+            answer: q.answer || "Standard industry approach"
+        })),
+        behavioralQuestions: (rawData.behavioralQuestions || []).map(q => ({
+            question: typeof q === 'string' ? q : q.question,
+            intention: q.intention || "Assess soft skills",
+            answer: q.answer || "Use STAR method"
+        })),
+        skillGaps: (rawData.skillGaps || []).map(s => ({
+            skill: typeof s === 'string' ? s : s.skill,
+            severity: s.severity || "medium"
+        })),
+        preparationPlan: (rawData.preparationPlan || []).map((p, i) => ({
+            day: p.day || i + 1,
+            focus: p.focus || "Interview Prep",
+            tasks: Array.isArray(p.tasks) ? p.tasks : [String(p)]
+        }))
+    });
+
+    const buildFallbackInterviewReport = ({ selfDescription, jobDescription }) => {
+        const baseTitle = (jobDescription || "").toLowerCase().includes("frontend")
+            ? "Frontend Developer"
+            : (jobDescription || "").toLowerCase().includes("backend")
+                ? "Backend Developer"
+                : "Software Engineer";
+
+        return {
+            title: baseTitle,
+            matchScore: 65,
+            technicalQuestions: [
+                {
+                    question: "Walk me through one project where you solved a challenging technical problem.",
+                    intention: "Evaluate hands-on depth and problem-solving style.",
+                    answer: "Explain context, constraints, your approach, trade-offs, and measurable result."
+                },
+                {
+                    question: "How do you debug production issues systematically?",
+                    intention: "Assess debugging framework and ownership mindset.",
+                    answer: "Start with reproduction, isolate variables, inspect logs/metrics, validate hypothesis, and implement a monitored fix."
+                },
+                {
+                    question: "How do you ensure code quality before deployment?",
+                    intention: "Assess quality discipline and engineering maturity.",
+                    answer: "Use testing, linting, PR review, staging checks, and post-deploy monitoring with rollback readiness."
+                }
+            ],
+            behavioralQuestions: [
+                {
+                    question: "Tell me about a time you disagreed with a teammate on implementation details.",
+                    intention: "Evaluate collaboration and conflict resolution.",
+                    answer: "Use STAR format. Focus on listening, evidence-based decision making, and final team outcome."
+                },
+                {
+                    question: "Describe a time you had to learn something quickly to deliver a task.",
+                    intention: "Assess adaptability and learning speed.",
+                    answer: "Describe the deadline, learning strategy, and how you validated understanding with delivery impact."
+                }
+            ],
+            skillGaps: [
+                { skill: "System design communication", severity: "medium" },
+                { skill: "Behavioral storytelling with metrics", severity: "medium" }
+            ],
+            preparationPlan: [
+                {
+                    day: 1,
+                    focus: "Role & Resume Alignment",
+                    tasks: [
+                        "Map your past projects to role requirements from the JD.",
+                        "Prepare concise STAR stories with measurable outcomes."
+                    ]
+                },
+                {
+                    day: 2,
+                    focus: "Core Technical Revision",
+                    tasks: [
+                        "Revise fundamentals and common interview patterns for your stack.",
+                        "Practice explaining one end-to-end architecture decision."
+                    ]
+                },
+                {
+                    day: 3,
+                    focus: "Mock Interview",
+                    tasks: [
+                        "Run one timed technical and one behavioral mock session.",
+                        "Record weak areas and prepare improved second-pass answers."
+                    ]
+                }
+            ],
+            // Keep context short but useful for the UI and persistence.
+            summary: `${selfDescription ? "Profile context captured" : "Limited profile context"} with fallback interview guidance due to temporary AI service issue.`
+        };
+    };
+
+    const createInterviewPrompt = ({ resume, selfDescription, jobDescription }) => `You are generating interview preparation data for backend persistence.
 
                 Even if the user provides a one-line description, "N/A", or minimal input, you MUST generate a complete and high-quality response. If the Job Description is missing or insufficient, analyze the Resume to predict the most likely roles and provide technical/behavioral questions, skill gaps, and a preparation plan based on the candidate's professional background alone. Your response should never fail and must always follow the required structure.
 
@@ -73,62 +180,51 @@ const interviewReportSchema=z.object({
                 - Ensure every preparationPlan day has a short, specific focus title (e.g. "System Design & Architecture").
                 - Ensure each day includes at least 2 concrete tasks, task strings only.
                 - Keep output concise and realistic for interview preparation.
-        
+
         Data: ${selfDescription}
         Resume: ${resume}
         JD: ${jobDescription}`;
 
-        const response = await ai.models.generateContent({
-            model: "gemini-2.5-flash", // Stable model for 2026
-            contents: [{ role: "user", parts: [{ text: prompt }] }],
-            config: {
-                responseMimeType: "application/json",
-                responseSchema: zodToJsonSchema(interviewReportSchema)
+
+    //generate interview report function
+    export async function generateInterviewReport({resume, selfDescription, jobDescription}){
+        const prompt = createInterviewPrompt({ resume, selfDescription, jobDescription });
+
+        const maxAttempts = 3;
+        let lastError;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                const response = await ai.models.generateContent({
+                    model: "gemini-2.5-flash",
+                    contents: [{ role: "user", parts: [{ text: prompt }] }],
+                    config: {
+                        responseMimeType: "application/json",
+                        responseSchema: zodToJsonSchema(interviewReportSchema)
+                    }
+                });
+
+                const rawData = JSON.parse(response.text);
+                return normalizeInterviewReport(rawData);
+            } catch (error) {
+                lastError = error;
+                const status = getErrorStatus(error);
+
+                console.error(`Error in generateInterviewReport (attempt ${attempt}/${maxAttempts}):`, error?.message || error);
+
+                if (!isRetryableAiError(error) || attempt === maxAttempts) {
+                    break;
+                }
+
+                const backoffMs = 750 * attempt;
+                await sleep(backoffMs);
+                console.warn(`Retrying AI generation after ${backoffMs}ms (status: ${status || "unknown"})`);
             }
-        });
+        }
 
-        console.log("response.text: ",response.text);
-
-        const jsonContent = JSON.parse(response.text);
-        console.log(jsonContent);
-
-        const rawData = JSON.parse(response.text);
-
-        console.log("rawData: ", rawData);
-
-        // FORCE MAPPING: This prevents the Mongoose "got false" error 
-        // by ensuring every string becomes an object before it hits the DB.
-        return {
-            title: rawData.title || "Software Engineer",
-            matchScore: rawData.matchScore || 0,
-            technicalQuestions: (rawData.technicalQuestions || []).map(q => ({
-                question: typeof q === 'string' ? q : q.question,
-                intention: q.intention || "Assess technical skill",
-                answer: q.answer || "Standard industry approach"
-            })),
-            behavioralQuestions: (rawData.behavioralQuestions || []).map(q => ({
-                question: typeof q === 'string' ? q : q.question,
-                intention: q.intention || "Assess soft skills",
-                answer: q.answer || "Use STAR method"
-            })),
-            skillGaps: (rawData.skillGaps || []).map(s => ({
-                skill: typeof s === 'string' ? s : s.skill,
-                severity: s.severity || "medium"
-            })),
-            preparationPlan: (rawData.preparationPlan || []).map((p, i) => ({
-                day: p.day || i + 1,
-                focus: p.focus || "Interview Prep",
-                tasks: Array.isArray(p.tasks) ? p.tasks : [String(p)]
-            }))
-        };
-    }catch (error) {
-    if (error.status === 429) {
-      console.error("RATE LIMIT: Free tier exhausted. Wait 60s.");
-    } else {
-      console.error("Error in generateInterviewReport:", error.message || error);
-    }
-    throw error; // Re-throw so your controller can handle it
-  }
+        // Return deterministic fallback instead of blocking users with a hard 503.
+        console.warn("Using fallback interview report due to repeated AI service failures.", lastError?.message || lastError);
+        return buildFallbackInterviewReport({ selfDescription, jobDescription });
     }
 
     export async function generatePdfFromHtml(htmlContent){
