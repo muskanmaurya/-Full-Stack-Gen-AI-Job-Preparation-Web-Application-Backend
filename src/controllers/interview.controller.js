@@ -20,67 +20,87 @@ const getResumeText = async (resumeFile) => {
  */
 
 export const generateInterviewReportController=async(req, res)=>{
+    try {
+        const resumeFile =req.file; // Access the uploaded file from multer
+        const {selfDescription, jobDescription} = req.body;
 
-    const resumeFile =req.file; // Access the uploaded file from multer
-    const {selfDescription, jobDescription} = req.body;
-
-    if (!jobDescription) {
-        return res.status(400).json({
-            message: "Job description is required"
-        })
-    }
-
-    if (!resumeFile || !selfDescription) {
-        return res.status(400).json({
-            message: "Both resume and self description are required"
-        })
-    }
-
-    const resumeText = await getResumeText(resumeFile);
-
-    const interviewReportByAi=await generateInterviewReport({
-        resume:resumeText,
-        selfDescription,
-        jobDescription
-    })
-
-    console.log("Generated Interview Report by AI:", interviewReportByAi);
-
-    if (req.user?.isGuest) {
-        const tempReportId = `guest-report-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        const interviewReport = {
-            _id: tempReportId,
-            user: req.user.id,
-            resume: resumeText,
-            selfDescription,
-            jobDescription,
-            ...interviewReportByAi,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-            isGuest: true,
+        if (!jobDescription) {
+            return res.status(400).json({
+                message: "Job description is required"
+            })
         }
 
-        guestInterviewReports.set(getGuestReportKey(req.user.id, tempReportId), interviewReport);
+        if (!resumeFile || !selfDescription) {
+            return res.status(400).json({
+                message: "Both resume and self description are required"
+            })
+        }
+
+        const resumeText = await getResumeText(resumeFile);
+
+        const interviewReportByAi=await generateInterviewReport({
+            resume:resumeText,
+            selfDescription,
+            jobDescription
+        })
+
+        console.log("Generated Interview Report by AI:", interviewReportByAi);
+
+        if (req.user?.isGuest) {
+            const tempReportId = `guest-report-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+            const interviewReport = {
+                _id: tempReportId,
+                user: req.user.id,
+                resume: resumeText,
+                selfDescription,
+                jobDescription,
+                ...interviewReportByAi,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+                isGuest: true,
+            }
+
+            guestInterviewReports.set(getGuestReportKey(req.user.id, tempReportId), interviewReport);
+
+            return res.status(201).json({
+                message:"Temporary guest interview report generated successfully",
+                interviewReport
+            })
+        }
+
+        const interviewReport = await interviewReportModel.create({
+            user:req.user.id,
+            resume:resumeText,
+            selfDescription,
+            jobDescription,
+            ...interviewReportByAi
+        })
+
 
         return res.status(201).json({
-            message:"Temporary guest interview report generated successfully",
+            message:"Interview report generated successfully",
             interviewReport
         })
+    } catch (error) {
+        console.error("Error in generateInterviewReportController:", error?.message || error);
+
+        const upstreamStatus = error?.status || error?.response?.status;
+        if (upstreamStatus === 429) {
+            return res.status(503).json({
+                message: "AI service quota/rate limit reached. Please try again in a minute."
+            })
+        }
+
+        if (upstreamStatus === 503) {
+            return res.status(503).json({
+                message: "AI service is temporarily unavailable. Please try again shortly."
+            })
+        }
+
+        return res.status(500).json({
+            message: "Failed to generate interview report"
+        })
     }
-
-    const interviewReport = await interviewReportModel.create({
-        user:req.user.id,
-        resume:resumeText,
-        selfDescription,
-        jobDescription,
-        ...interviewReportByAi
-    })
-
-
-    res.status(201).json({
-        message:"Interview report generated successfully",
-        interviewReport
-    })
 }
 
 /**
