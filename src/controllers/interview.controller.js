@@ -182,14 +182,19 @@ export const generateResumePdfController=async(req,res)=>{
 
         if (req.user?.isGuest) {
             const interviewReport = guestInterviewReports.get(getGuestReportKey(req.user.id, interviewReportId));
+            const fallbackResume = req.body?.resume;
+            const fallbackSelfDescription = req.body?.selfDescription;
+            const fallbackJobDescription = req.body?.jobDescription;
 
-            if(!interviewReport){
+            if (!interviewReport && (!fallbackResume || !fallbackSelfDescription || !fallbackJobDescription)) {
                 return res.status(404).json({
-                    message:"Interview report not found"
+                    message:"Guest interview report expired. Please regenerate the report before downloading resume."
                 })
             }
 
-            const {resume,selfDescription,jobDescription}=interviewReport;
+            const resume = interviewReport?.resume || fallbackResume;
+            const selfDescription = interviewReport?.selfDescription || fallbackSelfDescription;
+            const jobDescription = interviewReport?.jobDescription || fallbackJobDescription;
             const pdfBuffer = await generateResumePdf({resume, selfDescription, jobDescription})
 
             res.set({

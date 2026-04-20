@@ -211,6 +211,11 @@ const interviewReportSchema=z.object({
                 const status = getErrorStatus(error);
 
                 console.error(`Error in generateInterviewReport (attempt ${attempt}/${maxAttempts}):`, error?.message || error);
+                console.error("AI interview generation error details:", {
+                    status,
+                    code: error?.code,
+                    message: error?.message,
+                });
 
                 if (!isRetryableAiError(error) || attempt === maxAttempts) {
                     break;
@@ -228,16 +233,109 @@ const interviewReportSchema=z.object({
     }
 
     export async function generatePdfFromHtml(htmlContent){
-        const browser=await puppeteer.launch();
-        const page=await browser.newPage();
-        await page.setContent(htmlContent,{waitUntil:"networkidle0"})
+        const browser = await puppeteer.launch({
+            headless: true,
+            args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+        });
 
-        const pdfBuffer=await page.pdf({format:"A4",margin : { top: "15px", bottom: "15px", left: "10px", right: "10px"}})
+        try {
+            const page = await browser.newPage();
+            await page.setContent(htmlContent, { waitUntil: "networkidle0" });
 
-        await browser.close();
+            const pdfBuffer = await page.pdf({
+                format: "A4",
+                printBackground: true,
+                margin: { top: "15px", bottom: "15px", left: "10px", right: "10px" },
+            });
 
-        return pdfBuffer;
+            return pdfBuffer;
+        } finally {
+            await browser.close();
+        }
     }
+
+    const escapeHtml = (value = "") => String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/\"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+
+    const buildFallbackResumeHtml = ({ resume, selfDescription, jobDescription }) => {
+        const resumeText = escapeHtml(resume || "");
+        const selfText = escapeHtml(selfDescription || "");
+        const jobText = escapeHtml(jobDescription || "");
+
+        return `
+            <html>
+                <head>
+                    <meta charset="utf-8" />
+                    <style>
+                        body {
+                            font-family: Arial, sans-serif;
+                            color: #1f2937;
+                            margin: 32px;
+                            line-height: 1.6;
+                        }
+                        h1 {
+                            font-size: 26px;
+                            margin-bottom: 8px;
+                            color: #111827;
+                        }
+                        h2 {
+                            font-size: 16px;
+                            margin-top: 24px;
+                            margin-bottom: 8px;
+                            color: #0f172a;
+                            border-bottom: 1px solid #e5e7eb;
+                            padding-bottom: 4px;
+                        }
+                        .meta {
+                            color: #4b5563;
+                            font-size: 13px;
+                            margin-bottom: 20px;
+                        }
+                        .section {
+                            margin-bottom: 18px;
+                        }
+                        .text {
+                            white-space: pre-wrap;
+                            font-size: 13px;
+                        }
+                        .pill {
+                            display: inline-block;
+                            background: #e0f2fe;
+                            color: #075985;
+                            padding: 4px 10px;
+                            border-radius: 999px;
+                            font-size: 12px;
+                            margin-bottom: 12px;
+                        }
+                    </style>
+                </head>
+                <body>
+                    <div class="pill">Resume Summary</div>
+                    <h1>Professional Resume</h1>
+                    <div class="meta">Tailored for: ${jobText || "General Software Role"}</div>
+
+                    <div class="section">
+                        <h2>Self Description</h2>
+                        <div class="text">${selfText || "No self description provided."}</div>
+                    </div>
+
+                    <div class="section">
+                        <h2>Resume Content</h2>
+                        <div class="text">${resumeText || "No resume text available."}</div>
+                    </div>
+
+                    <div class="section">
+                        <h2>Job Description</h2>
+                        <div class="text">${jobText || "No job description provided."}</div>
+                    </div>
+                </body>
+            </html>
+        `;
+    };
 
     export async function generateResumePdf({resume, selfDescription, jobDescription}){
         const resumePdfSchema = z.object({
@@ -259,18 +357,33 @@ const interviewReportSchema=z.object({
                         Keep the layout print-safe and simple for A4 pages, and avoid fixed viewport heights that break pagination.
                     `
 
-        const response = await ai.models.generateContent({
-            model:"gemini-2.5-flash",
-            contents:prompt,
-            config:{
-                responseMimeType:"application/json",
-                responseSchema:zodToJsonSchema(resumePdfSchema)
+        const maxAttempts = 2;
+        let lastError;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                const response = await ai.models.generateContent({
+                    model:"gemini-2.5-flash",
+                    contents:prompt,
+                    config:{
+                        responseMimeType:"application/json",
+                        responseSchema:zodToJsonSchema(resumePdfSchema)
+                    }
+                })
+
+                const jsonContent = JSON.parse(response.text);
+                return await generatePdfFromHtml(jsonContent.html);
+            } catch (error) {
+                lastError = error;
+                console.error(`Error in generateResumePdf (attempt ${attempt}/${maxAttempts}):`, error?.message || error);
+
+                if (attempt < maxAttempts) {
+                    await sleep(750 * attempt);
+                }
             }
-        }) 
-        
-        const jsonContent= JSON.parse(response.text)
+        }
 
-        const pdfBuffer = await generatePdfFromHtml(jsonContent.html);
-
-        return pdfBuffer;
+        console.warn("Using fallback resume PDF HTML due to AI failure.", lastError?.message || lastError);
+        const fallbackHtml = buildFallbackResumeHtml({ resume, selfDescription, jobDescription });
+        return await generatePdfFromHtml(fallbackHtml);
     }
