@@ -43,6 +43,18 @@ const interviewReportSchema=z.object({
     // Create a single instance of GoogleGenAI to be used across the application
     const ai = new GoogleGenAI({ apiKey });
 
+    const INTERVIEW_MODEL_CANDIDATES = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+    ];
+
+    const RESUME_MODEL_CANDIDATES = [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+    ];
+
     const RETRYABLE_STATUS_CODES = new Set([429, 500, 502, 503, 504]);
     const DEFAULT_PUPPETEER_ARGS = [
         "--no-sandbox",
@@ -108,6 +120,50 @@ const interviewReportSchema=z.object({
         const code = error?.code;
 
         return RETRYABLE_STATUS_CODES.has(status) || code === "ETIMEDOUT" || code === "ECONNRESET";
+    };
+
+    const generateStructuredContent = async ({ modelCandidates, prompt, responseJsonSchema }) => {
+        let lastError;
+
+        for (const model of modelCandidates) {
+            for (let attempt = 1; attempt <= 2; attempt += 1) {
+                try {
+                    const response = await ai.models.generateContent({
+                        model,
+                        contents: [{ role: "user", parts: [{ text: prompt }] }],
+                        config: {
+                            responseMimeType: "application/json",
+                            responseJsonSchema,
+                        },
+                    });
+
+                    if (!response?.text) {
+                        throw new Error(`AI model ${model} returned an empty response.`);
+                    }
+
+                    return JSON.parse(response.text);
+                } catch (error) {
+                    lastError = error;
+                    const status = getErrorStatus(error);
+
+                    console.error(`AI generation failed for model ${model} (attempt ${attempt}/2):`, error?.message || error);
+                    console.error("AI generation error details:", {
+                        status,
+                        code: error?.code,
+                        message: error?.message,
+                    });
+
+                    if (!isRetryableAiError(error) || attempt === 2) {
+                        break;
+                    }
+
+                    const backoffMs = 500 * attempt;
+                    await sleep(backoffMs);
+                }
+            }
+        }
+
+        throw lastError;
     };
 
     const normalizeInterviewReport = (rawData) => ({
@@ -242,42 +298,19 @@ const interviewReportSchema=z.object({
     //generate interview report function
     export async function generateInterviewReport({resume, selfDescription, jobDescription}){
         const prompt = createInterviewPrompt({ resume, selfDescription, jobDescription });
-
-        const maxAttempts = 3;
         let lastError;
 
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            try {
-                const response = await ai.models.generateContent({
-                    model: "gemini-2.5-flash",
-                    contents: [{ role: "user", parts: [{ text: prompt }] }],
-                    config: {
-                        responseMimeType: "application/json",
-                        responseJsonSchema: zodToJsonSchema(interviewReportSchema)
-                    }
-                });
+        try {
+            const rawData = await generateStructuredContent({
+                modelCandidates: INTERVIEW_MODEL_CANDIDATES,
+                prompt,
+                responseJsonSchema: zodToJsonSchema(interviewReportSchema),
+            });
 
-                const rawData = JSON.parse(response.text);
-                return normalizeInterviewReport(rawData);
-            } catch (error) {
-                lastError = error;
-                const status = getErrorStatus(error);
-
-                console.error(`Error in generateInterviewReport (attempt ${attempt}/${maxAttempts}):`, error?.message || error);
-                console.error("AI interview generation error details:", {
-                    status,
-                    code: error?.code,
-                    message: error?.message,
-                });
-
-                if (!isRetryableAiError(error) || attempt === maxAttempts) {
-                    break;
-                }
-
-                const backoffMs = 750 * attempt;
-                await sleep(backoffMs);
-                console.warn(`Retrying AI generation after ${backoffMs}ms (status: ${status || "unknown"})`);
-            }
+            return normalizeInterviewReport(rawData);
+        } catch (error) {
+            lastError = error;
+            console.error("AI interview generation failed across all candidate models:", error?.message || error);
         }
 
         // Return deterministic fallback instead of blocking users with a hard 503.
@@ -425,38 +458,23 @@ const interviewReportSchema=z.object({
                         Keep the layout print-safe and simple for A4 pages, and avoid fixed viewport heights that break pagination.
                     `
 
-        const maxAttempts = 2;
-        let lastError;
+        let jsonContent;
 
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            try {
-                const response = await ai.models.generateContent({
-                    model:"gemini-2.5-flash",
-                    contents:prompt,
-                    config:{
-                        responseMimeType:"application/json",
-                        responseJsonSchema:zodToJsonSchema(resumePdfSchema)
-                    }
-                })
-
-                const jsonContent = JSON.parse(response.text);
-                return await generatePdfFromHtml(jsonContent.html);
-            } catch (error) {
-                lastError = error;
-                console.error(`Error in generateResumePdf (attempt ${attempt}/${maxAttempts}):`, error?.message || error);
-                console.error("AI/HTML resume generation details:", {
-                    status: getErrorStatus(error),
-                    code: error?.code,
-                    message: error?.message,
-                });
-
-                if (attempt < maxAttempts) {
-                    await sleep(750 * attempt);
-                }
-            }
+        try {
+            jsonContent = await generateStructuredContent({
+                modelCandidates: RESUME_MODEL_CANDIDATES,
+                prompt,
+                responseJsonSchema: zodToJsonSchema(resumePdfSchema),
+            });
+        } catch (error) {
+            console.error("AI resume generation failed across all candidate models:", error?.message || error);
         }
 
-        console.warn("Using fallback resume PDF HTML due to AI failure.", lastError?.message || lastError);
+        if (jsonContent?.html) {
+            return await generatePdfFromHtml(jsonContent.html);
+        }
+
+        console.warn("Using fallback resume PDF HTML due to AI failure.", jsonContent?.html ? "Invalid HTML payload" : "No structured response returned");
         const fallbackHtml = buildFallbackResumeHtml({ resume, selfDescription, jobDescription });
         try {
             return await generatePdfFromHtml(fallbackHtml);
