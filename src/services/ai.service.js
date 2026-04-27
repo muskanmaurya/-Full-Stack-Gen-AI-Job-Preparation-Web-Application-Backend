@@ -253,7 +253,7 @@ const interviewReportSchema=z.object({
                     contents: [{ role: "user", parts: [{ text: prompt }] }],
                     config: {
                         responseMimeType: "application/json",
-                        responseSchema: zodToJsonSchema(interviewReportSchema)
+                        responseJsonSchema: zodToJsonSchema(interviewReportSchema)
                     }
                 });
 
@@ -435,7 +435,7 @@ const interviewReportSchema=z.object({
                     contents:prompt,
                     config:{
                         responseMimeType:"application/json",
-                        responseSchema:zodToJsonSchema(resumePdfSchema)
+                        responseJsonSchema:zodToJsonSchema(resumePdfSchema)
                     }
                 })
 
