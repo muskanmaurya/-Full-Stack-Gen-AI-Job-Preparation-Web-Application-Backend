@@ -280,6 +280,7 @@ const interviewReportSchema=z.object({
         }
 
                 Rules:
+                - CRITICAL STRING RULE: All string fields must contain plain text prose ONLY. Never include escaped inner quotes (\"), raw structural JSON elements, or repeat key names (e.g., do NOT start a string value with 'question\":' or 'day\":').
                 - Use object arrays only. Never output flattened tokens like ["question", "..."] or ["day", "1", "focus", ...].
                 - Ensure every question item has question, intention, answer.
                 - Ensure every skill gap item has skill and severity.
