@@ -166,28 +166,249 @@ const interviewReportSchema=z.object({
         throw lastError;
     };
 
+    const NOISE_TOKENS = new Set(["", "-1", "null", "undefined", "n/a", "na", "none"]);
+    const QUESTION_KEY_TOKENS = new Set(["question", "intention", "answer"]);
+    const PLAN_KEY_TOKENS = new Set(["day", "focus", "tasks"]);
+
+    const sanitizeText = (value) => {
+        if (value === null || value === undefined) return "";
+
+        return String(value)
+            .replace(/^\s*"|"\s*$/g, "")
+            .replace(/\\"/g, '"')
+            .trim();
+    };
+
+    const isNoiseText = (value) => {
+        const text = sanitizeText(value).toLowerCase();
+        return NOISE_TOKENS.has(text);
+    };
+
+    const clampMatchScore = (value) => {
+        const numeric = Number(value);
+        if (!Number.isFinite(numeric)) return 0;
+        return Math.max(0, Math.min(100, Math.round(numeric)));
+    };
+
+    const parseQuestionTokenStream = (tokens, defaults) => {
+        const parsed = [];
+        let current = {
+            question: "",
+            intention: defaults.intention,
+            answer: defaults.answer,
+        };
+
+        for (let i = 0; i < tokens.length; i += 1) {
+            const key = sanitizeText(tokens[i]).toLowerCase();
+            const value = sanitizeText(tokens[i + 1]);
+
+            if (!QUESTION_KEY_TOKENS.has(key) || !value) {
+                continue;
+            }
+
+            if (key === "question" && current.question) {
+                parsed.push({ ...current });
+                current = {
+                    question: "",
+                    intention: defaults.intention,
+                    answer: defaults.answer,
+                };
+            }
+
+            current[key] = value;
+            i += 1;
+        }
+
+        if (current.question) {
+            parsed.push(current);
+        }
+
+        return parsed;
+    };
+
+    const normalizeQuestions = (items, defaults) => {
+        const source = Array.isArray(items) ? items : [];
+        const fromObjects = source
+            .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+            .map((item) => ({
+                question: sanitizeText(item.question),
+                intention: sanitizeText(item.intention) || defaults.intention,
+                answer: sanitizeText(item.answer) || defaults.answer,
+            }));
+
+        let normalized = fromObjects;
+
+        if (normalized.length === 0) {
+            normalized = parseQuestionTokenStream(source, defaults);
+        }
+
+        return normalized.filter((item) => {
+            const normalizedQuestion = item.question.toLowerCase();
+            if (!item.question || isNoiseText(item.question)) return false;
+            return !QUESTION_KEY_TOKENS.has(normalizedQuestion);
+        });
+    };
+
+    const parseSkillTokenStream = (tokens) => {
+        const parsed = [];
+        let current = { skill: "", severity: "medium" };
+
+        for (let i = 0; i < tokens.length; i += 1) {
+            const key = sanitizeText(tokens[i]).toLowerCase();
+            const value = sanitizeText(tokens[i + 1]);
+
+            if (!["skill", "severity"].includes(key) || !value) {
+                continue;
+            }
+
+            if (key === "skill" && current.skill) {
+                parsed.push({ ...current });
+                current = { skill: "", severity: "medium" };
+            }
+
+            current[key] = key === "severity" ? value.toLowerCase() : value;
+            i += 1;
+        }
+
+        if (current.skill) {
+            parsed.push(current);
+        }
+
+        return parsed;
+    };
+
+    const normalizeSkillGaps = (items) => {
+        const source = Array.isArray(items) ? items : [];
+        const fromObjects = source
+            .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+            .map((item) => ({
+                skill: sanitizeText(item.skill),
+                severity: sanitizeText(item.severity).toLowerCase(),
+            }));
+
+        let normalized = fromObjects;
+        if (normalized.length === 0) {
+            normalized = parseSkillTokenStream(source);
+        }
+
+        return normalized
+            .map((item) => ({
+                skill: item.skill,
+                severity: ["low", "medium", "high"].includes(item.severity) ? item.severity : "medium",
+            }))
+            .filter((item) => {
+                const skillLower = item.skill.toLowerCase();
+                if (!item.skill || isNoiseText(item.skill)) return false;
+                if (["skill", "severity", "low", "medium", "high"].includes(skillLower)) return false;
+                return true;
+            });
+    };
+
+    const parsePlanTokenStream = (tokens) => {
+        const plans = [];
+        let current = { day: undefined, focus: "", tasks: [] };
+        let currentKey = "";
+
+        const pushCurrent = () => {
+            if (!current.day && !current.focus && current.tasks.length === 0) {
+                current = { day: undefined, focus: "", tasks: [] };
+                currentKey = "";
+                return;
+            }
+
+            plans.push({ ...current, tasks: [...current.tasks] });
+            current = { day: undefined, focus: "", tasks: [] };
+            currentKey = "";
+        };
+
+        for (let i = 0; i < tokens.length; i += 1) {
+            const token = sanitizeText(tokens[i]);
+            const lowered = token.toLowerCase();
+
+            if (lowered === "day") {
+                if (current.day || current.focus || current.tasks.length > 0) {
+                    pushCurrent();
+                }
+                currentKey = "day";
+                continue;
+            }
+
+            if (lowered === "focus" || lowered === "tasks") {
+                currentKey = lowered;
+                continue;
+            }
+
+            if (currentKey === "day") {
+                const parsedDay = Number(token);
+                if (Number.isInteger(parsedDay) && parsedDay > 0) {
+                    current.day = parsedDay;
+                }
+                continue;
+            }
+
+            if (currentKey === "focus" && token) {
+                current.focus = token;
+                continue;
+            }
+
+            if (currentKey === "tasks" && token) {
+                current.tasks.push(token);
+            }
+        }
+
+        pushCurrent();
+        return plans;
+    };
+
+    const normalizePreparationPlan = (items) => {
+        const source = Array.isArray(items) ? items : [];
+        const fromObjects = source
+            .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+            .map((item) => ({
+                day: Number(item.day),
+                focus: sanitizeText(item.focus),
+                tasks: Array.isArray(item.tasks) ? item.tasks.map((task) => sanitizeText(task)) : [sanitizeText(item.tasks)],
+            }));
+
+        let normalized = fromObjects;
+        if (normalized.length === 0) {
+            normalized = parsePlanTokenStream(source);
+        }
+
+        const cleaned = normalized.map((item, index) => {
+            const tasks = (item.tasks || [])
+                .map((task) => sanitizeText(task))
+                .filter((task) => {
+                    const lowered = task.toLowerCase();
+                    if (!task || isNoiseText(task)) return false;
+                    return !PLAN_KEY_TOKENS.has(lowered);
+                });
+
+            return {
+                day: Number.isInteger(item.day) && item.day > 0 ? item.day : index + 1,
+                focus: !item.focus || isNoiseText(item.focus) ? "Interview Prep" : item.focus,
+                tasks: tasks.length > 0 ? tasks : ["Complete preparation tasks for this day."],
+            };
+        });
+
+        return cleaned
+            .sort((a, b) => a.day - b.day)
+            .map((item, index) => ({ ...item, day: index + 1 }));
+    };
+
     const normalizeInterviewReport = (rawData) => ({
-        title: rawData.title || "Software Engineer",
-        matchScore: rawData.matchScore || 0,
-        technicalQuestions: (rawData.technicalQuestions || []).map(q => ({
-            question: typeof q === 'string' ? q : q.question,
-            intention: q.intention || "Assess technical skill",
-            answer: q.answer || "Standard industry approach"
-        })),
-        behavioralQuestions: (rawData.behavioralQuestions || []).map(q => ({
-            question: typeof q === 'string' ? q : q.question,
-            intention: q.intention || "Assess soft skills",
-            answer: q.answer || "Use STAR method"
-        })),
-        skillGaps: (rawData.skillGaps || []).map(s => ({
-            skill: typeof s === 'string' ? s : s.skill,
-            severity: s.severity || "medium"
-        })),
-        preparationPlan: (rawData.preparationPlan || []).map((p, i) => ({
-            day: p.day || i + 1,
-            focus: p.focus || "Interview Prep",
-            tasks: Array.isArray(p.tasks) ? p.tasks : [String(p)]
-        }))
+        title: sanitizeText(rawData?.title) || "Software Engineer",
+        matchScore: clampMatchScore(rawData?.matchScore),
+        technicalQuestions: normalizeQuestions(rawData?.technicalQuestions, {
+            intention: "Assess technical skill",
+            answer: "Standard industry approach",
+        }),
+        behavioralQuestions: normalizeQuestions(rawData?.behavioralQuestions, {
+            intention: "Assess soft skills",
+            answer: "Use STAR method",
+        }),
+        skillGaps: normalizeSkillGaps(rawData?.skillGaps),
+        preparationPlan: normalizePreparationPlan(rawData?.preparationPlan),
     });
 
     const buildFallbackInterviewReport = ({ selfDescription, jobDescription }) => {
@@ -264,64 +485,36 @@ const interviewReportSchema=z.object({
         };
     };
 
-    // const createInterviewPrompt = ({ resume, selfDescription, jobDescription }) => `You are generating interview preparation data for backend persistence.
+    const createInterviewPrompt = ({ resume, selfDescription, jobDescription }) => `You are generating interview preparation data for backend persistence.
 
-    //     Even if the user provides a one-line description, "N/A", or minimal input, you MUST generate a complete and high-quality response. If the Job Description is missing or insufficient, analyze the Resume to predict the most likely roles and provide technical/behavioral questions, skill gaps, and a preparation plan based on the candidate's professional background alone. Your response should never fail and must always follow the required structure.
+        Even if the user provides a one-line description, "N/A", or minimal input, you MUST generate a complete and high-quality response. If the Job Description is missing or insufficient, analyze the Resume to predict the most likely roles and provide technical/behavioral questions, skill gaps, and a preparation plan based on the candidate's professional background alone. Your response should never fail and must always follow the required structure.
 
-    //             Return ONLY valid JSON (no markdown, no explanation, no code fences).
-    //             Match this schema exactly:
-    //     {
-    //       "title": "string",
-    //       "matchScore": number,
-    //       "technicalQuestions": [{"question": "string", "intention": "string", "answer": "string"}],
-    //       "behavioralQuestions": [{"question": "string", "intention": "string", "answer": "string"}],
-    //       "skillGaps": [{"skill": "string", "severity": "low"|"medium"|"high"}],
-    //       "preparationPlan": [{"day": number, "focus": "string", "tasks": ["string"]}]
-    //     }
+                Return ONLY valid JSON (no markdown, no explanation, no code fences).
+                Match this schema exactly:
+        {
+          "title": "string",
+          "matchScore": number,
+          "technicalQuestions": [{"question": "string", "intention": "string", "answer": "string"}],
+          "behavioralQuestions": [{"question": "string", "intention": "string", "answer": "string"}],
+          "skillGaps": [{"skill": "string", "severity": "low"|"medium"|"high"}],
+          "preparationPlan": [{"day": number, "focus": "string", "tasks": ["string"]}]
+        }
 
-    //             Rules:
-    //             - CRITICAL STRING RULE: All string fields must contain plain text prose ONLY. Never include escaped inner quotes (\"), raw structural JSON elements, or repeat key names (e.g., do NOT start a string value with 'question\":' or 'day\":').
-    //             - Use object arrays only. Never output flattened tokens like ["question", "..."] or ["day", "1", "focus", ...].
-    //             - Ensure every question item has question, intention, answer.
-    //             - Ensure every skill gap item has skill and severity.
-    //             - Ensure preparationPlan has 0 to 4/5 days.
-    //             - If the candidate is already highly prepared, it is valid to return an empty preparationPlan.
-    //             - If preparationPlan is non-empty, ensure it is ordered by day starting at 1 with no gaps (1,2,3...).
-    //             - Ensure every preparationPlan day has a short, specific focus title (e.g. "System Design & Architecture").
-    //             - Ensure each day includes at least 2 concrete tasks, task strings only.
-    //             - Keep output concise and realistic for interview preparation.
+                Rules:
+                - CRITICAL STRING RULE: All string fields must contain plain text prose ONLY. Never include escaped inner quotes (\"), raw structural JSON elements, or repeat key names (e.g., do NOT start a string value with 'question\":' or 'day\":').
+                - Use object arrays only. Never output flattened tokens like ["question", "..."] or ["day", "1", "focus", ...].
+                - Ensure every question item has question, intention, answer.
+                - Ensure every skill gap item has skill and severity.
+                - Ensure preparationPlan has 0 to 4/5 days.
+                - If the candidate is already highly prepared, it is valid to return an empty preparationPlan.
+                - If preparationPlan is non-empty, ensure it is ordered by day starting at 1 with no gaps (1,2,3...).
+                - Ensure every preparationPlan day has a short, specific focus title (e.g. "System Design & Architecture").
+                - Ensure each day includes at least 2 concrete tasks, task strings only.
+                - Keep output concise and realistic for interview preparation.
 
-    //     Data: ${selfDescription}
-    //     Resume: ${resume}
-    //     JD: ${jobDescription}`;
-
-    const createInterviewPrompt = ({ resume, selfDescription, jobDescription }) => `You are an expert technical interviewer generating interview preparation data for backend persistence.
-
-Analyze the provided candidate details against the Target Job Description (JD). If the Job Description is missing, "N/A", or minimal, use your internal technical knowledge to predict the most likely industry roles based on the Resume alone, and generate the preparation plan accordingly. Your response must never fail.
-
-Return ONLY a valid JSON object matching the exact schema configuration below. 
-Do NOT wrap the output in markdown code blocks (no \`\`\`json, no \`\`\`), do NOT provide conversational explanations, and do NOT include any code fences.
-
-Match this schema format exactly:
-{
-  "title": "string",
-  "matchScore": number,
-  "technicalQuestions": [{"question": "string", "intention": "string", "answer": "string"}],
-  "behavioralQuestions": [{"question": "string", "intention": "string", "answer": "string"}],
-  "skillGaps": [{"skill": "string", "severity": "low"|"medium"|"high"}],
-  "preparationPlan": [{"day": number, "focus": "string", "tasks": ["string"]}]
-}
-
-CRITICAL DATA FORMATTING RULES:
-1. For "technicalQuestions" and "behavioralQuestions": The "question", "intention", and "answer" fields must contain clean, direct, human-readable text prose ONLY. Never start these strings with key headers like 'question":' or '\\"question\\":'. 
-2. For "skillGaps": The "skill" field must contain only the name of the technology or concept missing (e.g., "System Design", "CI/CD Pipelines"). Do NOT embed JSON markers.
-3. For "preparationPlan": The "tasks" array must be an array of simple text strings representing separate actionable items (e.g., ["Review Node.js event loop dynamics", "Practice 2 sum array problems on LeetCode"]). Do NOT combine the day number, the focus title, or nest secondary stringified JSON objects inside the tasks array elements.
-4. Clean Text Only: Do not use escaped inner quotes (\\") inside your text descriptions. Use standard single quotes (') if necessary.
-
-Candidate Data:
-Self-Description: ${selfDescription}
-Resume Data: ${resume}
-Target Job Description: ${jobDescription}`;
+        Data: ${selfDescription}
+        Resume: ${resume}
+        JD: ${jobDescription}`;
 
 
     //generate interview report function
@@ -336,7 +529,25 @@ Target Job Description: ${jobDescription}`;
                 responseJsonSchema: zodToJsonSchema(interviewReportSchema),
             });
 
-            return normalizeInterviewReport(rawData);
+            const normalized = normalizeInterviewReport(rawData);
+            const fallback = buildFallbackInterviewReport({ selfDescription, jobDescription });
+
+            return {
+                ...fallback,
+                ...normalized,
+                technicalQuestions: normalized.technicalQuestions.length > 0
+                    ? normalized.technicalQuestions
+                    : fallback.technicalQuestions,
+                behavioralQuestions: normalized.behavioralQuestions.length > 0
+                    ? normalized.behavioralQuestions
+                    : fallback.behavioralQuestions,
+                skillGaps: normalized.skillGaps.length > 0
+                    ? normalized.skillGaps
+                    : fallback.skillGaps,
+                preparationPlan: normalized.preparationPlan.length > 0
+                    ? normalized.preparationPlan
+                    : fallback.preparationPlan,
+            };
         } catch (error) {
             lastError = error;
             console.error("AI interview generation failed across all candidate models:", error?.message || error);
